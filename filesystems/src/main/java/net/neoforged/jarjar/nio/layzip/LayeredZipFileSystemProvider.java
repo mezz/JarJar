@@ -11,7 +11,6 @@ import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Path;
 import java.util.HashMap;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -44,8 +43,6 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         }
 
         String lastSection = sections[sections.length - 1];
-        if (lastSection.startsWith("//"))
-            lastSection = lastSection.substring(2);
 
         if (env.containsKey("packagePath"))
         { //User requests specific package as a target;
@@ -61,20 +58,19 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
             }
         }
 
-        lastSection = handleAbsolutePrefixOnWindows(workingSystem, lastSection);
-        final Path lastPath = workingSystem.getPath(lastSection).toAbsolutePath();
+        final Path lastPath = getPathFromUriSection(workingSystem, lastSection).toAbsolutePath();
         return getOrCreateNewSystem(keyPrefix, lastPath);
     }
 
-    private String handleAbsolutePrefixOnWindows(final FileSystem workingSystem, String section)
+    private Path getPathFromUriSection(final FileSystem workingSystem, final String section)
     {
-        if (workingSystem.getClass().getName().toLowerCase(Locale.ROOT).contains("windows"))
+        if (workingSystem == FileSystems.getDefault() && section.startsWith("/"))
         {
-            // Convert /C:/... and ///C:/... to C:/... so Windows recognizes the drive letter.
-            // Keep //server/share/... (network shares) and /mods/... (paths from the current drive's root) unchanged.
-            section = section.replaceFirst("^/+(?=[A-Za-z]:/)", "");
+            // The native provider understands file URI syntax, such as /C:/... on Windows.
+            return workingSystem.provider().getPath(URI.create("file:" + section));
         }
-        return section;
+        // Relative disk paths and paths inside ZIPs use their filesystem's path syntax.
+        return workingSystem.getPath(section);
     }
 
     private FileSystem getOrCreateNewSystem(final Path path)
@@ -89,8 +85,10 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
 
         try
         {
-            return super.newFileSystem(new URI(super.getScheme() + ":" + keyPrefix + path.toString()
-                                                                                         .replace("\\", "/")), args);
+            final String key = keyPrefix + path.toString().replace("\\", "/");
+            // Pass the scheme and key separately so filenames like "my archive.zip" are escaped.
+            // Parsing a concatenated URI string would reject the space with URISyntaxException.
+            return super.newFileSystem(new URI(super.getScheme(), key, null), args);
         } catch (Exception e)
         {
             throw new UncheckedIOException("Failed to create intermediary FS.", new IOException("Failed to process " +
@@ -115,8 +113,8 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         {
             for (int i = 0; i < sections.length - 1; i++)
             {
-                final String section = handleAbsolutePrefixOnWindows(workingSystem, sections[i]);
-                final Path path = workingSystem.getPath(section);
+                final String section = sections[i];
+                final Path path = getPathFromUriSection(workingSystem, section);
                 workingSystem = getOrCreateNewSystem(path);
             }
         }
@@ -143,8 +141,8 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         {
             for (int i = 0; i < sections.length - 1; i++)
             {
-                final String section = handleAbsolutePrefixOnWindows(workingSystem, sections[i]);
-                final Path path = workingSystem.getPath(section);
+                final String section = sections[i];
+                final Path path = getPathFromUriSection(workingSystem, section);
                 workingSystem = getOrCreateNewSystem(path);
             }
         }
@@ -241,11 +239,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         for (int i = 0; i < sections.length - 1; i++)
         {
             String section = sections[i];
-            if (section.startsWith("//"))
-                section = section.substring(2);
-
-            section = handleAbsolutePrefixOnWindows(workingSystem, section);
-            final Path path = workingSystem.getPath(section).toAbsolutePath();
+            final Path path = getPathFromUriSection(workingSystem, section).toAbsolutePath();
             workingSystem = getOrCreateNewSystem(keyPrefix, path);
             keyPrefix += path.toString().replace("\\", "/") + PATH_SEPERATOR;
         }

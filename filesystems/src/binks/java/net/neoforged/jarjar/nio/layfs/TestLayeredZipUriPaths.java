@@ -29,6 +29,7 @@ public class TestLayeredZipUriPaths {
     @TempDir
     Path temporaryDirectory;
 
+    private Path archivePath;
     private URI archiveUri;
 
     @BeforeEach
@@ -40,8 +41,8 @@ public class TestLayeredZipUriPaths {
             archive.closeEntry();
         }
 
-        final Path outerArchive = temporaryDirectory.resolve("archive.zip");
-        try (ZipOutputStream archive = new ZipOutputStream(Files.newOutputStream(outerArchive))) {
+        archivePath = temporaryDirectory.resolve("archive.zip");
+        try (ZipOutputStream archive = new ZipOutputStream(Files.newOutputStream(archivePath))) {
             archive.putNextEntry(new ZipEntry(ENTRY_NAME));
             archive.write(OUTER_CONTENTS.getBytes(StandardCharsets.UTF_8));
             archive.closeEntry();
@@ -51,7 +52,7 @@ public class TestLayeredZipUriPaths {
         }
 
         // Path.toUri supplies the platform's file URI format, including the drive prefix on Windows.
-        final URI fileUri = outerArchive.toUri();
+        final URI fileUri = archivePath.toUri();
         final String archiveLocation = fileUri.getRawSchemeSpecificPart();
         // Change only the scheme so Java's filesystem APIs select JarJar's provider.
         archiveUri = URI.create("jij:" + archiveLocation);
@@ -62,10 +63,7 @@ public class TestLayeredZipUriPaths {
         // With no packagePath, newFileSystem must convert the URI's location into a native file path.
         try (FileSystem archive = FileSystems.newFileSystem(archiveUri, Collections.emptyMap())) {
             final Path entryPath = archive.getPath(ENTRY_NAME);
-            final List<String> expectedLines = Collections.singletonList(OUTER_CONTENTS);
-            final List<String> actualLines = Files.readAllLines(entryPath);
-
-            assertEquals(expectedLines, actualLines);
+            assertContents(entryPath, OUTER_CONTENTS);
         }
     }
 
@@ -75,10 +73,22 @@ public class TestLayeredZipUriPaths {
         final URI entryUri = URI.create(archiveUri + "~/" + ENTRY_NAME);
         final Path entryPath = Paths.get(entryUri);
         try (FileSystem archive = entryPath.getFileSystem()) {
-            final List<String> expectedLines = Collections.singletonList(OUTER_CONTENTS);
-            final List<String> actualLines = Files.readAllLines(entryPath);
+            assertContents(entryPath, OUTER_CONTENTS);
+        }
+    }
 
-            assertEquals(expectedLines, actualLines);
+    @Test
+    public void testGetPathFromArchiveWithSpaceInName() throws IOException {
+        final Path archiveWithSpace = temporaryDirectory.resolve("archive with space.zip");
+        Files.move(archivePath, archiveWithSpace);
+
+        // Path.toUri encodes the space as %20; lookup must open the filename containing the actual space.
+        final URI fileUri = archiveWithSpace.toUri();
+        final String archiveLocation = fileUri.getRawSchemeSpecificPart();
+        final URI entryUri = URI.create("jij:" + archiveLocation + "~/" + ENTRY_NAME);
+        final Path entryPath = Paths.get(entryUri);
+        try (FileSystem archive = entryPath.getFileSystem()) {
+            assertContents(entryPath, OUTER_CONTENTS);
         }
     }
 
@@ -89,10 +99,7 @@ public class TestLayeredZipUriPaths {
         final URI entryUri = URI.create("jij:" + archivePath + "~/" + ENTRY_NAME);
         final Path entryPath = Paths.get(entryUri);
         try (FileSystem archive = entryPath.getFileSystem()) {
-            final List<String> expectedLines = Collections.singletonList(OUTER_CONTENTS);
-            final List<String> actualLines = Files.readAllLines(entryPath);
-
-            assertEquals(expectedLines, actualLines);
+            assertContents(entryPath, OUTER_CONTENTS);
         }
     }
 
@@ -106,10 +113,7 @@ public class TestLayeredZipUriPaths {
         try (FileSystem outerArchive = nestedArchivePath.getFileSystem();
              FileSystem innerArchive = resolvedFileSystem) {
             final Path entryPath = innerArchive.getPath(ENTRY_NAME);
-            final List<String> expectedLines = Collections.singletonList(NESTED_CONTENTS);
-            final List<String> actualLines = Files.readAllLines(entryPath);
-
-            assertEquals(expectedLines, actualLines);
+            assertContents(entryPath, NESTED_CONTENTS);
         }
     }
 
@@ -124,10 +128,13 @@ public class TestLayeredZipUriPaths {
         // Both ZIPs must close so Windows can delete them. Resources close in reverse order: inner, then outer.
         try (FileSystem outerArchive = nestedArchivePath.getFileSystem();
              FileSystem innerArchive = entryFileSystem) {
-            final List<String> expectedLines = Collections.singletonList(NESTED_CONTENTS);
-            final List<String> actualLines = Files.readAllLines(entryPath);
-
-            assertEquals(expectedLines, actualLines);
+            assertContents(entryPath, NESTED_CONTENTS);
         }
+    }
+
+    private void assertContents(Path entryPath, String expectedContents) throws IOException {
+        final List<String> expectedLines = Collections.singletonList(expectedContents);
+        final List<String> actualLines = Files.readAllLines(entryPath);
+        assertEquals(expectedLines, actualLines);
     }
 }
