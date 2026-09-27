@@ -43,7 +43,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
             }
         }
 
-        final URI[] sections = parseUriSections(uri);
+        final UriSection[] sections = parseUriSections(uri);
 
         FileSystem workingSystem = FileSystems.getDefault(); //Grab the normal disk FS.
         String keyPrefix = "";
@@ -55,28 +55,43 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
             workingSystem = adaptedURI.getFileSystem();
         }
 
-        final URI lastSection = sections[sections.length - 1];
-        final Path lastPath = getPathFromUriSection(workingSystem, lastSection).toAbsolutePath();
+        final UriSection lastSection = sections[sections.length - 1];
+        final Path lastPath = lastSection.toPath(workingSystem).toAbsolutePath();
         return getOrCreateNewSystem(keyPrefix, lastPath);
     }
 
-    private static URI[] parseUriSections(final URI uri)
+    private static UriSection[] parseUriSections(final URI uri)
     {
         // Split before decoding so escaped '~/' characters do not introduce an archive boundary.
         return Arrays.stream(uri.getRawSchemeSpecificPart().split(URI_SPLIT_REGEX))
-                .map(section -> URI.create("file:" + section))
-                .toArray(URI[]::new);
+                .map(UriSection::new)
+                .toArray(UriSection[]::new);
     }
 
-    private Path getPathFromUriSection(final FileSystem workingSystem, final URI section)
+    private static final class UriSection
     {
-        if (workingSystem == FileSystems.getDefault() && !section.isOpaque())
+        private final URI fileUri;
+
+        private UriSection(final String rawSection)
         {
-            // The native provider understands file URI syntax, such as /C:/... on Windows.
-            return workingSystem.provider().getPath(section);
+            this.fileUri = URI.create("file:" + rawSection);
         }
-        // Relative disk paths and paths inside ZIPs use their filesystem's path syntax.
-        return workingSystem.getPath(section.getSchemeSpecificPart());
+
+        private String getKey()
+        {
+            return fileUri.getRawSchemeSpecificPart();
+        }
+
+        private Path toPath(final FileSystem workingSystem)
+        {
+            if (workingSystem == FileSystems.getDefault() && !fileUri.isOpaque())
+            {
+                // The native provider understands file URI syntax, such as /C:/... on Windows.
+                return workingSystem.provider().getPath(fileUri);
+            }
+            // Relative disk paths and paths inside ZIPs use their filesystem's path syntax.
+            return workingSystem.getPath(fileUri.getSchemeSpecificPart());
+        }
     }
 
     private FileSystem getOrCreateNewSystem(final Path path)
@@ -110,7 +125,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         if (existing.isPresent())
             return existing.get().getPath("/");
 
-        final URI[] sections = parseUriSections(uri);
+        final UriSection[] sections = parseUriSections(uri);
         if (sections.length == 1)
             return super.getPath(uri);
 
@@ -119,14 +134,14 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         {
             for (int i = 0; i < sections.length - 1; i++)
             {
-                final URI section = sections[i];
-                final Path path = getPathFromUriSection(workingSystem, section);
+                final UriSection section = sections[i];
+                final Path path = section.toPath(workingSystem);
                 workingSystem = getOrCreateNewSystem(path);
             }
         }
 
-        final URI lastSection = sections[sections.length - 1];
-        return getPathFromUriSection(workingSystem, lastSection);
+        final UriSection lastSection = sections[sections.length - 1];
+        return lastSection.toPath(workingSystem);
     }
 
     @Override
@@ -136,7 +151,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         if (existing.isPresent())
             return existing.get();
 
-        final URI[] sections = parseUriSections(uri);
+        final UriSection[] sections = parseUriSections(uri);
         if (sections.length == 1)
         {
             return super.getFileSystem(uri);
@@ -147,14 +162,14 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         {
             for (int i = 0; i < sections.length - 1; i++)
             {
-                final URI section = sections[i];
-                final Path path = getPathFromUriSection(workingSystem, section);
+                final UriSection section = sections[i];
+                final Path path = section.toPath(workingSystem);
                 workingSystem = getOrCreateNewSystem(path);
             }
         }
 
-        final URI lastSection = sections[sections.length - 1];
-        final Path lastPath = getPathFromUriSection(workingSystem, lastSection);
+        final UriSection lastSection = sections[sections.length - 1];
+        final Path lastPath = lastSection.toPath(workingSystem);
         return getOrCreateNewSystem(lastPath);
     }
 
@@ -210,12 +225,12 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         return pathParts;
     }
 
-    private AdaptedURIWithPrefixSelection adaptUriSections(final URI[] sections) {
+    private AdaptedURIWithPrefixSelection adaptUriSections(final UriSection[] sections) {
         String keyPrefix = "";
         FileSystem workingSystem = FileSystems.getDefault();
 
         //First try a reverse lookup of a key based approach:
-        final String rootKey = sections[0].getRawSchemeSpecificPart();
+        final String rootKey = sections[0].getKey();
         final Optional<FileSystem> rootKnownCandidateSystem = super.getFileSystemFromKey(rootKey);
         if (rootKnownCandidateSystem.isPresent()) {
             //Okey special case: We have a file system in the root that is known to us.
@@ -230,19 +245,19 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
 
             for (int i = 1; i < sections.length - 2; i++)
             {
-                final Path path = getPathFromUriSection(workingSystem, sections[i]).toAbsolutePath();
+                final Path path = sections[i].toPath(workingSystem).toAbsolutePath();
                 workingSystem = getOrCreateNewSystem(keyPrefix, path);
                 keyPrefix += path.toString().replace("\\", "/") + PATH_SEPERATOR;
             }
 
-            return new AdaptedURIWithPrefixSelection(workingSystem, sections[sections.length - 1].getRawSchemeSpecificPart());
+            return new AdaptedURIWithPrefixSelection(workingSystem, sections[sections.length - 1].getKey());
         }
 
         //This is now a special case here, we might be in native land so we need to deal with it.
         for (int i = 0; i < sections.length - 1; i++)
         {
-            final URI section = sections[i];
-            final Path path = getPathFromUriSection(workingSystem, section).toAbsolutePath();
+            final UriSection section = sections[i];
+            final Path path = section.toPath(workingSystem).toAbsolutePath();
             workingSystem = getOrCreateNewSystem(keyPrefix, path);
             keyPrefix += path.toString().replace("\\", "/") + PATH_SEPERATOR;
         }
