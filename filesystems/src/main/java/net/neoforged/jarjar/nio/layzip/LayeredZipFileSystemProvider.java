@@ -61,6 +61,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
             }
         }
 
+        lastSection = handleAbsolutePrefixOnWindows(workingSystem, lastSection);
         final Path lastPath = workingSystem.getPath(lastSection).toAbsolutePath();
         return getOrCreateNewSystem(keyPrefix, lastPath);
     }
@@ -69,13 +70,9 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
     {
         if (workingSystem.getClass().getName().toLowerCase(Locale.ROOT).contains("windows"))
         {
-            //This special casing is needed, since else the rooted paths crash on Windows system because:
-            // /D:/something is not a valid path on Windows.
-            //However, the JDK does not expose the Windows FS types and there are no marker classes, so we use the
-            // classname.
-            //Because we are fancy like that.
-            if (section.startsWith("/"))
-                section = section.substring(1); //Turns /D:/something into D:/Something which is a valid windows path.
+            // Convert /C:/... and ///C:/... to C:/... so Windows recognizes the drive letter.
+            // Keep //server/share/... (network shares) and /mods/... (paths from the current drive's root) unchanged.
+            section = section.replaceFirst("^/+(?=[A-Za-z]:/)", "");
         }
         return section;
     }
@@ -118,7 +115,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         {
             for (int i = 0; i < sections.length - 1; i++)
             {
-                final String section = sections[i];
+                final String section = handleAbsolutePrefixOnWindows(workingSystem, sections[i]);
                 final Path path = workingSystem.getPath(section);
                 workingSystem = getOrCreateNewSystem(path);
             }
@@ -146,7 +143,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         {
             for (int i = 0; i < sections.length - 1; i++)
             {
-                final String section = sections[i];
+                final String section = handleAbsolutePrefixOnWindows(workingSystem, sections[i]);
                 final Path path = workingSystem.getPath(section);
                 workingSystem = getOrCreateNewSystem(path);
             }
