@@ -10,6 +10,7 @@ import java.net.URISyntaxException;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -30,47 +31,52 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
     @Override
     public FileSystem newFileSystem(final URI uri, final Map<String, ?> env) throws IOException
     {
-        final String[] sections = uri.getRawSchemeSpecificPart().split(URI_SPLIT_REGEX);
+        if (env.containsKey("packagePath"))
+        { //User requests specific package as a target;
+            try
+            {
+                return super.newFileSystem(uri, env);
+            } catch (Exception e)
+            {
+                throw new UncheckedIOException("Failed to create intermediary FS.",
+                        new IOException("Failed to process data.", e));
+            }
+        }
+
+        final URI[] sections = parseUriSections(uri);
 
         FileSystem workingSystem = FileSystems.getDefault(); //Grab the normal disk FS.
         String keyPrefix = "";
 
-        if (sections.length > 1 && !env.containsKey("packagePath"))
+        if (sections.length > 1)
         {
             final AdaptedURIWithPrefixSelection adaptedURI = adaptUriSections(sections);
             keyPrefix = adaptedURI.getPrefix();
             workingSystem = adaptedURI.getFileSystem();
         }
 
-        String lastSection = sections[sections.length - 1];
-
-        if (env.containsKey("packagePath"))
-        { //User requests specific package as a target;
-            try
-            {
-                return super.newFileSystem(new URI(super.getScheme() + ":" + uri.getRawSchemeSpecificPart()),
-                        env);
-            } catch (Exception e)
-            {
-                throw new UncheckedIOException("Failed to create intermediary FS.", new IOException("Failed to " +
-                                                                                                    "process data.",
-                        e));
-            }
-        }
-
+        final URI lastSection = sections[sections.length - 1];
         final Path lastPath = getPathFromUriSection(workingSystem, lastSection).toAbsolutePath();
         return getOrCreateNewSystem(keyPrefix, lastPath);
     }
 
-    private Path getPathFromUriSection(final FileSystem workingSystem, final String section)
+    private static URI[] parseUriSections(final URI uri)
     {
-        if (workingSystem == FileSystems.getDefault() && section.startsWith("/"))
+        // Split before decoding so escaped '~/' characters do not introduce an archive boundary.
+        return Arrays.stream(uri.getRawSchemeSpecificPart().split(URI_SPLIT_REGEX))
+                .map(section -> URI.create("file:" + section))
+                .toArray(URI[]::new);
+    }
+
+    private Path getPathFromUriSection(final FileSystem workingSystem, final URI section)
+    {
+        if (workingSystem == FileSystems.getDefault() && !section.isOpaque())
         {
             // The native provider understands file URI syntax, such as /C:/... on Windows.
-            return workingSystem.provider().getPath(URI.create("file:" + section));
+            return workingSystem.provider().getPath(section);
         }
         // Relative disk paths and paths inside ZIPs use their filesystem's path syntax.
-        return workingSystem.getPath(section);
+        return workingSystem.getPath(section.getSchemeSpecificPart());
     }
 
     private FileSystem getOrCreateNewSystem(final Path path)
@@ -104,7 +110,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         if (existing.isPresent())
             return existing.get().getPath("/");
 
-        final String[] sections = uri.getRawSchemeSpecificPart().split(URI_SPLIT_REGEX);
+        final URI[] sections = parseUriSections(uri);
         if (sections.length == 1)
             return super.getPath(uri);
 
@@ -113,14 +119,14 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         {
             for (int i = 0; i < sections.length - 1; i++)
             {
-                final String section = sections[i];
+                final URI section = sections[i];
                 final Path path = getPathFromUriSection(workingSystem, section);
                 workingSystem = getOrCreateNewSystem(path);
             }
         }
 
-        final String lastSection = sections[sections.length - 1];
-        return workingSystem.getPath(lastSection);
+        final URI lastSection = sections[sections.length - 1];
+        return getPathFromUriSection(workingSystem, lastSection);
     }
 
     @Override
@@ -130,7 +136,7 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         if (existing.isPresent())
             return existing.get();
 
-        final String[] sections = uri.getRawSchemeSpecificPart().split(URI_SPLIT_REGEX);
+        final URI[] sections = parseUriSections(uri);
         if (sections.length == 1)
         {
             return super.getFileSystem(uri);
@@ -141,14 +147,14 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         {
             for (int i = 0; i < sections.length - 1; i++)
             {
-                final String section = sections[i];
+                final URI section = sections[i];
                 final Path path = getPathFromUriSection(workingSystem, section);
                 workingSystem = getOrCreateNewSystem(path);
             }
         }
 
-        final String lastSection = sections[sections.length - 1];
-        final Path lastPath = workingSystem.getPath(lastSection);
+        final URI lastSection = sections[sections.length - 1];
+        final Path lastPath = getPathFromUriSection(workingSystem, lastSection);
         return getOrCreateNewSystem(lastPath);
     }
 
@@ -204,41 +210,38 @@ public class LayeredZipFileSystemProvider extends PathFileSystemProvider
         return pathParts;
     }
 
-    private AdaptedURIWithPrefixSelection adaptUriSections(final String[] sections) {
+    private AdaptedURIWithPrefixSelection adaptUriSections(final URI[] sections) {
         String keyPrefix = "";
         FileSystem workingSystem = FileSystems.getDefault();
 
         //First try a reverse lookup of a key based approach:
-        final Optional<FileSystem> rootKnownCandidateSystem = super.getFileSystemFromKey(sections[0]);
+        final String rootKey = sections[0].getRawSchemeSpecificPart();
+        final Optional<FileSystem> rootKnownCandidateSystem = super.getFileSystemFromKey(rootKey);
         if (rootKnownCandidateSystem.isPresent()) {
             //Okey special case: We have a file system in the root that is known to us.
             //We will recursively resolve this untill we have handled all sections:
             //First deal with the case that we do not have any other paths:
             if (sections.length == 1) {
-                return new AdaptedURIWithPrefixSelection(rootKnownCandidateSystem.get(), sections[0]);
+                return new AdaptedURIWithPrefixSelection(rootKnownCandidateSystem.get(), rootKey);
             }
 
             workingSystem = rootKnownCandidateSystem.get();
-            keyPrefix += sections[0].replace("\\", "/") + PATH_SEPERATOR;
+            keyPrefix = rootKey + PATH_SEPERATOR;
 
             for (int i = 1; i < sections.length - 2; i++)
             {
-                String section = sections[i];
-                if (section.startsWith("/"))
-                    section = section.substring(1);
-
-                final Path path = workingSystem.getPath(section).toAbsolutePath();
+                final Path path = getPathFromUriSection(workingSystem, sections[i]).toAbsolutePath();
                 workingSystem = getOrCreateNewSystem(keyPrefix, path);
                 keyPrefix += path.toString().replace("\\", "/") + PATH_SEPERATOR;
             }
 
-            return new AdaptedURIWithPrefixSelection(workingSystem, sections[sections.length - 1]);
+            return new AdaptedURIWithPrefixSelection(workingSystem, sections[sections.length - 1].getRawSchemeSpecificPart());
         }
 
         //This is now a special case here, we might be in native land so we need to deal with it.
         for (int i = 0; i < sections.length - 1; i++)
         {
-            String section = sections[i];
+            final URI section = sections[i];
             final Path path = getPathFromUriSection(workingSystem, section).toAbsolutePath();
             workingSystem = getOrCreateNewSystem(keyPrefix, path);
             keyPrefix += path.toString().replace("\\", "/") + PATH_SEPERATOR;

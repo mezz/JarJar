@@ -9,6 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
@@ -40,19 +41,23 @@ public class TestLayeredZipUriPaths {
 
     @BeforeEach
     public void createArchiveFixture() throws IOException {
-        final Path nestedArchive = temporaryDirectory.resolve(NESTED_ARCHIVE_NAME);
+        createArchiveFixture("archive.zip", NESTED_ARCHIVE_NAME, ENTRY_NAME);
+    }
+
+    private void createArchiveFixture(String archiveName, String nestedArchiveName, String entryName) throws IOException {
+        final Path nestedArchive = temporaryDirectory.resolve(nestedArchiveName);
         try (ZipOutputStream archive = new ZipOutputStream(Files.newOutputStream(nestedArchive))) {
-            archive.putNextEntry(new ZipEntry(ENTRY_NAME));
+            archive.putNextEntry(new ZipEntry(entryName));
             archive.write(NESTED_CONTENTS.getBytes(StandardCharsets.UTF_8));
             archive.closeEntry();
         }
 
-        archivePath = temporaryDirectory.resolve("archive.zip");
+        archivePath = temporaryDirectory.resolve(archiveName);
         try (ZipOutputStream archive = new ZipOutputStream(Files.newOutputStream(archivePath))) {
-            archive.putNextEntry(new ZipEntry(ENTRY_NAME));
+            archive.putNextEntry(new ZipEntry(entryName));
             archive.write(OUTER_CONTENTS.getBytes(StandardCharsets.UTF_8));
             archive.closeEntry();
-            archive.putNextEntry(new ZipEntry(NESTED_ARCHIVE_NAME));
+            archive.putNextEntry(new ZipEntry(nestedArchiveName));
             Files.copy(nestedArchive, archive);
             archive.closeEntry();
         }
@@ -102,6 +107,23 @@ public class TestLayeredZipUriPaths {
         final Path entryPath = Paths.get(entryUri);
         try (FileSystem archive = entryPath.getFileSystem()) {
             assertContents(entryPath, OUTER_CONTENTS);
+        }
+    }
+
+    @Test
+    public void testEncodedNamesAcrossArchiveLayers() throws IOException, URISyntaxException {
+        final String nestedArchiveName = "nested %20 #+.zip";
+        final String entryName = "message %20 #+.txt";
+        createArchiveFixture("archive %20 #+.zip", nestedArchiveName, entryName);
+        final URI nestedArchivePath = new URI(null, null, "/" + nestedArchiveName, null);
+        final URI entryPath = new URI(null, null, "/" + entryName, null);
+        final URI entryUri = URI.create(archiveUri + "~" + nestedArchivePath + "~" + entryPath);
+
+        final Path resolvedEntry = Paths.get(entryUri);
+        final PathFileSystem innerArchive = (PathFileSystem) resolvedEntry.getFileSystem();
+        try (FileSystem outerArchive = innerArchive.getTarget().getFileSystem();
+             FileSystem archive = innerArchive) {
+            assertContents(resolvedEntry, NESTED_CONTENTS);
         }
     }
 
