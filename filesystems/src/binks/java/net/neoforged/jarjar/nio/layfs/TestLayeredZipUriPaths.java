@@ -1,8 +1,10 @@
 package net.neoforged.jarjar.nio.layfs;
 
+import net.neoforged.jarjar.nio.layzip.LayeredZipFileSystemProvider;
 import net.neoforged.jarjar.nio.pathfs.PathFileSystem;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
@@ -19,6 +21,10 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestLayeredZipUriPaths {
     private static final String ENTRY_NAME = "message.txt";
@@ -54,6 +60,11 @@ public class TestLayeredZipUriPaths {
         // Path.toUri supplies the platform's file URI format, including the drive prefix on Windows.
         final URI fileUri = archivePath.toUri();
         final String archiveLocation = fileUri.getRawSchemeSpecificPart();
+        assertTrue(archiveLocation.startsWith("///"), "The fixture URI must have three leading slashes: " + fileUri);
+        if (OS.WINDOWS.isCurrentOs()) {
+            assertTrue(fileUri.getRawPath().matches("/[A-Za-z]:/.*"),
+                    "The Windows fixture URI must include a drive prefix such as /C:/: " + fileUri);
+        }
         // Change only the scheme so Java's filesystem APIs select JarJar's provider.
         archiveUri = URI.create("jij:" + archiveLocation);
     }
@@ -85,6 +96,8 @@ public class TestLayeredZipUriPaths {
         // Path.toUri encodes the space as %20; lookup must open the filename containing the actual space.
         final URI fileUri = archiveWithSpace.toUri();
         final String archiveLocation = fileUri.getRawSchemeSpecificPart();
+        assertTrue(archiveLocation.endsWith("/archive%20with%20space.zip"),
+                "The fixture URI must encode the spaces in the archive filename: " + fileUri);
         final URI entryUri = URI.create("jij:" + archiveLocation + "~/" + ENTRY_NAME);
         final Path entryPath = Paths.get(entryUri);
         try (FileSystem archive = entryPath.getFileSystem()) {
@@ -96,6 +109,10 @@ public class TestLayeredZipUriPaths {
     public void testGetPathWithSingleLeadingSlash() throws IOException {
         // getRawPath omits the URI's empty host prefix, giving '/C:/...' instead of '///C:/...' on Windows.
         final String archivePath = archiveUri.getRawPath();
+        assertTrue(archivePath.startsWith("/"), "The archive path must start with a slash");
+        assertFalse(archivePath.startsWith("//"), "The archive path must have only one leading slash");
+        assertEquals("//" + archivePath, archiveUri.getRawSchemeSpecificPart(),
+                "getRawPath must omit the two slashes before the URI path");
         final URI entryUri = URI.create("jij:" + archivePath + "~/" + ENTRY_NAME);
         final Path entryPath = Paths.get(entryUri);
         try (FileSystem archive = entryPath.getFileSystem()) {
@@ -112,6 +129,8 @@ public class TestLayeredZipUriPaths {
         // Both ZIPs must close so Windows can delete them. Resources close in reverse order: inner, then outer.
         try (FileSystem outerArchive = nestedArchivePath.getFileSystem();
              FileSystem innerArchive = resolvedFileSystem) {
+            assertEquals(NESTED_ARCHIVE_NAME, nestedArchivePath.getFileName().toString(),
+                    "The resolved filesystem must target the nested ZIP");
             final Path entryPath = innerArchive.getPath(ENTRY_NAME);
             assertContents(entryPath, NESTED_CONTENTS);
         }
@@ -128,11 +147,18 @@ public class TestLayeredZipUriPaths {
         // Both ZIPs must close so Windows can delete them. Resources close in reverse order: inner, then outer.
         try (FileSystem outerArchive = nestedArchivePath.getFileSystem();
              FileSystem innerArchive = entryFileSystem) {
+            final PathFileSystem outerZip = assertInstanceOf(PathFileSystem.class, outerArchive,
+                    "The nested ZIP must be a path inside the outer archive");
+            final Path outerArchivePath = outerZip.getTarget();
+            assertSame(FileSystems.getDefault(), outerArchivePath.getFileSystem(),
+                    "The outer ZIP must be a path on the native filesystem");
             assertContents(entryPath, NESTED_CONTENTS);
         }
     }
 
     private void assertContents(Path entryPath, String expectedContents) throws IOException {
+        assertInstanceOf(LayeredZipFileSystemProvider.class, entryPath.getFileSystem().provider(),
+                "Entry lookup must exercise JarJar's filesystem provider");
         final List<String> expectedLines = Collections.singletonList(expectedContents);
         final List<String> actualLines = Files.readAllLines(entryPath);
         assertEquals(expectedLines, actualLines);
